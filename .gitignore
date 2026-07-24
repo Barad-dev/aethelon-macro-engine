@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+
+# Local Database / State (DB اصلی الان تو AppData هست)
+*.db
+*.sqlite3
+
+# Environment variables
+.env
