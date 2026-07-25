@@ -15,12 +15,15 @@ from .desk_schemas import (
     MacroDials,
     MacroScores,
     MacroStateSection,
+    MarketImpact,
     RegimeDistributionRow,
     RegimeHistorySection,
     RegimeTimelineRow,
     ResearchDeskPayload,
     SampleStudyBlock,
     SectionsOk,
+    dumps_research_desk,
+    parse_research_desk,
 )
 
 __all__ = [
@@ -32,10 +35,13 @@ __all__ = [
     "MacroDials",
     "MacroScores",
     "MacroStateSection",
+    "MarketImpact",
     "RegimeDistributionRow",
     "RegimeHistorySection",
     "RegimeTimelineRow",
     "ResearchDeskPayload",
     "SampleStudyBlock",
     "SectionsOk",
+    "dumps_research_desk",
+    "parse_research_desk",
 ]
