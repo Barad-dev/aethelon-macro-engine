@@ -17,3 +17,5 @@ ENV/
 
 # Environment variables
 .env
+
+AGENTS.md
