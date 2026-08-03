@@ -1190,7 +1190,7 @@ def print_help():
 
   FILES:
     run_engine.py           Main entry point (this file)
-    paths.py                AppData path resolver (%APPDATA%\\Quantamental)
+    paths.py                AppData path resolver (%APPDATA%\\Aethelon)
     models/                 Pydantic v2 Research Desk contracts
     gui_qt_dashboard.py     PySide6 main window (Research Desk + legacy)
     research_desk_view.py   Research Desk 4-section view (5.2)
@@ -1201,9 +1201,9 @@ def print_help():
     backfill_macro_history.py  MacroState history builder (ops CLI)
 
   DATA:
-    Windows: %%APPDATA%%\\Quantamental\\data\\news_engine_store.db
-    Other:   ~/.quantamental/data/news_engine_store.db
-    Legacy install-local DB is auto-migrated on first run.
+    Windows: %%APPDATA%%\\Aethelon\\data\\news_engine_store.db
+    Other:   ~/.aethelon/data/news_engine_store.db
+    Legacy Quantamental / install-local DBs are auto-migrated on first run.
 
   INSTALL:
     pip install requests feedparser PySide6 pydantic

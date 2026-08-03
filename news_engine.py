@@ -101,7 +101,10 @@ from research_desk_data import build_research_desk, get_research_desk_from_conte
 # CONFIGURATION
 # =============================================================================
 
-FRED_API_KEY = "b87476a6ad12cd8025ce9f5baf4528d4"
+# FRED key must come from the environment — never hardcode secrets in source.
+# Set FRED_API_KEY in the process environment (or a local untracked .env loader).
+FRED_API_KEY: str = (os.environ.get("FRED_API_KEY") or "").strip()
+_FRED_KEY_WARNED: bool = False
 
 NEWS_LOOKBACK_HOURS = 24
 _STORE_RETENTION_HOURS = 72
@@ -194,10 +197,10 @@ FF_HEADERS = {
     "Referer": "https://www.forexfactory.com/",
 }
 
-# Durable store under %APPDATA%\Quantamental\data\ (see paths.py)
+# Durable store under %APPDATA%\Aethelon\data\ (see paths.py)
 from paths import DB_FILENAME, get_db_path_str, ensure_app_dirs, describe_paths  # noqa: E402
 
-DB_PATH = get_db_path_str(migrate=True)  # AppData path; migrates legacy local DB once
+DB_PATH = get_db_path_str(migrate=True)  # AppData path; migrates legacy DB once
 _DB_RETENTION_DAYS = 30
 _DB_LOCK = threading.RLock()
 ensure_app_dirs()
@@ -772,12 +775,44 @@ def get_ff_calendar(force_refresh: bool = False) -> list[dict]:
 # FRED API
 # =============================================================================
 
+def _fred_api_key() -> str:
+    """
+    Resolve FRED API key from the environment (refreshed each call).
+
+    Never falls back to a hardcoded secret. Returns ``\"\"`` when unset.
+    """
+    global FRED_API_KEY, _FRED_KEY_WARNED
+    key = (os.environ.get("FRED_API_KEY") or "").strip()
+    FRED_API_KEY = key
+    if not key and not _FRED_KEY_WARNED:
+        _FRED_KEY_WARNED = True
+        print(
+            "   [FRED] WARNING: FRED_API_KEY is not set in the environment. "
+            "FRED fetches will be skipped until the key is provided."
+        )
+    return key
+
+
 def _fetch_fred_series(series_id: str, limit: int = 5) -> list[dict]:
+    """
+    Fetch recent observations for one FRED series.
+
+    Returns an empty list when the API key is missing or the request fails
+    (never raises into the listener loop).
+    """
+    api_key = _fred_api_key()
+    if not api_key:
+        return []
     try:
         r = requests.get(
             "https://api.stlouisfed.org/fred/series/observations",
-            params={"series_id": series_id, "api_key": FRED_API_KEY,
-                    "file_type": "json", "limit": limit, "sort_order": "desc"},
+            params={
+                "series_id": series_id,
+                "api_key": api_key,
+                "file_type": "json",
+                "limit": limit,
+                "sort_order": "desc",
+            },
             headers=HEADERS,
             timeout=10,
         )
@@ -786,8 +821,16 @@ def _fetch_fred_series(series_id: str, limit: int = 5) -> list[dict]:
     except Exception:
         return []
 
+
 def _fetch_all_fred() -> dict:
-    """Fetch all FRED series in parallel (much faster than sequential)."""
+    """
+    Fetch all configured FRED series in parallel.
+
+    If ``FRED_API_KEY`` is unset, returns ``{}`` immediately without network I/O.
+    """
+    if not _fred_api_key():
+        return {}
+
     result: dict = {}
     result_lock = threading.Lock()
 
@@ -797,8 +840,9 @@ def _fetch_all_fred() -> dict:
             with result_lock:
                 result[sid] = obs
 
-    threads = [threading.Thread(target=_one, args=(sid,), daemon=True)
-               for sid in FRED_SERIES]
+    threads = [
+        threading.Thread(target=_one, args=(sid,), daemon=True) for sid in FRED_SERIES
+    ]
     for t in threads:
         t.start()
     deadline = time.time() + 25
@@ -969,6 +1013,9 @@ def _listener_cycle_fred() -> None:
     state = _SOURCE_STATE["fred"]
     state["last_attempt"] = datetime.now()
     try:
+        if not _fred_api_key():
+            state["last_note"] = "skipped (FRED_API_KEY not set)"
+            return
         data = _fetch_all_fred()
         for sid, obs in data.items():
             _merge_fred_series(sid, obs)

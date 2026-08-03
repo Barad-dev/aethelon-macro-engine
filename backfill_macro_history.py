@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--db",
         default=None,
-        help="Path to news_engine_store.db (default: %%APPDATA%%\\Quantamental\\data\\)",
+        help="Path to news_engine_store.db (default: %%APPDATA%%\\Aethelon\\data\\)",
     )
     parser.add_argument("--api-key", default=None, help="FRED API key (or set FRED_API_KEY)")
     args = parser.parse_args(argv)

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-utils/logger.py — Centralized singleton logger (Stage A)
-========================================================
-Primary log path:
+utils/logger.py — Centralized singleton logger (Stage A / B3.1)
+===============================================================
+Primary log path (aligned with ``paths.py``):
+
   Windows : %APPDATA%\\Aethelon\\logs\\app.log
   Other   : ~/.aethelon/logs/app.log
 
@@ -31,7 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants (APP_NAME must match paths.APP_NAME = "Aethelon")
 # ---------------------------------------------------------------------------
 
 APP_NAME = "Aethelon"
@@ -51,19 +52,24 @@ def get_logs_dir() -> Path:
     """
     Resolve the durable logs directory.
 
-    Windows → %APPDATA%\\Aethelon\\logs
-    Other   → ~/.aethelon/logs
+    Prefers ``paths.get_logs_dir()`` so logger and DB share one AppData root.
+    Falls back to a local Aethelon layout if ``paths`` is unavailable.
     """
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA")
-        if not base:
-            base = str(Path.home() / "AppData" / "Roaming")
-        root = Path(base) / APP_NAME
-    else:
-        root = Path.home() / f".{APP_NAME.lower()}"
-    logs = root / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    return logs
+    try:
+        from paths import get_logs_dir as _paths_logs_dir
+
+        return _paths_logs_dir()
+    except Exception:
+        if sys.platform == "win32":
+            base = os.environ.get("APPDATA")
+            if not base:
+                base = str(Path.home() / "AppData" / "Roaming")
+            root = Path(base) / APP_NAME
+        else:
+            root = Path.home() / f".{APP_NAME.lower()}"
+        logs = root / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        return logs
 
 
 def log_path() -> Path:

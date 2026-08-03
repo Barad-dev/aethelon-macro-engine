@@ -78,17 +78,28 @@ def parse_iso_utc(value: str) -> datetime:
 
 
 def default_watermark_path() -> Path:
-    """Resolve the default AppData watermark JSON path."""
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA") or str(
-            Path.home() / "AppData" / "Roaming"
-        )
-        root = Path(base) / _APP_NAME
-    else:
-        root = Path.home() / f".{_APP_NAME.lower()}"
-    state = root / _STATE_SUBDIR
-    state.mkdir(parents=True, exist_ok=True)
-    return state / _DEFAULT_FILENAME
+    """
+    Resolve the default AppData watermark JSON path.
+
+    Canonical: ``%APPDATA%\\Aethelon\\state\\watermarks.json`` (via ``paths``).
+    """
+    try:
+        from paths import get_state_dir
+
+        state = get_state_dir()
+        state.mkdir(parents=True, exist_ok=True)
+        return state / _DEFAULT_FILENAME
+    except Exception:
+        if sys.platform == "win32":
+            base = os.environ.get("APPDATA") or str(
+                Path.home() / "AppData" / "Roaming"
+            )
+            root = Path(base) / _APP_NAME
+        else:
+            root = Path.home() / f".{_APP_NAME.lower()}"
+        state = root / _STATE_SUBDIR
+        state.mkdir(parents=True, exist_ok=True)
+        return state / _DEFAULT_FILENAME
 
 
 # =============================================================================

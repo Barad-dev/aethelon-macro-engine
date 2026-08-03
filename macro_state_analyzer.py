@@ -83,7 +83,7 @@ BACKFILL_SERIES = (
     "M2SL", "WALCL", "VIXCLS",
 )
 
-# Default DB path — %APPDATA%\Quantamental\data\ (see paths.py)
+# Default DB path — %APPDATA%\Aethelon\data\ (see paths.py)
 try:
     from paths import get_db_path_str as _resolve_db
     def _default_db() -> str:
