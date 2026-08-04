@@ -6,6 +6,7 @@ Public surface:
   • AsyncHttpClient / RetryPolicy — resilient HTTP transport
   • WatermarkManager — offline catch-up high-water marks
   • RSSDriver / ForexFactoryDriver / FREDDriver — source drivers
+  • IngestionOrchestrator — multi-source coordinator (B3.2)
   • Domain exceptions
 """
 
@@ -14,6 +15,7 @@ from aethelon.ingestion.drivers import (
     BaseDriver,
     FREDDriver,
     ForexFactoryDriver,
+    NormalizedItem,
     RSSDriver,
 )
 from aethelon.ingestion.exceptions import (
@@ -21,6 +23,7 @@ from aethelon.ingestion.exceptions import (
     IngestionNetworkError,
     RateLimitExceededError,
 )
+from aethelon.ingestion.orchestrator import IngestionOrchestrator
 from aethelon.ingestion.watermark import WatermarkManager, default_watermark_path
 
 __all__ = [
@@ -35,6 +38,9 @@ __all__ = [
     "RSSDriver",
     "ForexFactoryDriver",
     "FREDDriver",
+    "NormalizedItem",
+    # Orchestrator (B3.2)
+    "IngestionOrchestrator",
     # Errors
     "IngestionError",
     "IngestionNetworkError",
