@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-aethelon.ingestion.orchestrator — Stage B3.2 IngestionOrchestrator
-==================================================================
+aethelon.ingestion.orchestrator — Stage B3.2/B3.3 IngestionOrchestrator
+=======================================================================
 Coordinates existing source drivers and returns a flat list of
 ``NormalizedItem`` rows. This layer:
 
   * owns (or accepts) ``AsyncHttpClient`` + ``WatermarkManager``
+  * reads non-secret source lists from ``aethelon.ingestion.config``
   * calls ``RSSDriver``, ``ForexFactoryDriver``, and ``FREDDriver``
   * does **not** run NLP, sentiment, regime, thesis, or storage writes
 
 Drivers remain responsible for watermark filtering and advancement.
+API keys are resolved only from the environment (or an explicit override).
 """
 
 from __future__ import annotations
@@ -26,6 +28,12 @@ from typing import (
 
 from aethelon.core.logger import get_logger
 from aethelon.ingestion.client import AsyncHttpClient
+from aethelon.ingestion.config import (
+    FRED_API_KEY_ENV,
+    IngestionConfig,
+    RssFeedSpec,
+    default_ingestion_config,
+)
 from aethelon.ingestion.drivers import (
     FREDDriver,
     ForexFactoryDriver,
@@ -41,20 +49,21 @@ __all__ = [
 
 log = get_logger(__name__)
 
-# (source_name, feed_url) — preferred explicit form for RSS configuration
-RssFeedSpec = tuple[str, str]
-
 PathLike = Union[str, Path]
+
+# Sentinel: distinguish "caller omitted" from "caller passed empty / False".
+_UNSET: Any = object()
 
 
 class IngestionOrchestrator:
     """
-    Conservative multi-source ingestion coordinator (Stage B3.2).
+    Conservative multi-source ingestion coordinator (Stage B3.2 + B3.3).
 
     Responsibilities
     ----------------
     * Open / reuse an ``AsyncHttpClient``
     * Construct drivers with a shared ``WatermarkManager``
+    * Load source lists / endpoints from ``IngestionConfig``
     * Invoke each configured source
     * Collect every accepted ``NormalizedItem`` into one list
 
@@ -63,6 +72,7 @@ class IngestionOrchestrator:
     * NLP / sentiment / regime / thesis
     * Analytical database writes
     * Changing driver filter or watermark semantics
+    * Storing API keys in config files
 
     Parameters
     ----------
@@ -74,6 +84,9 @@ class IngestionOrchestrator:
         is used (``%APPDATA%\\Aethelon\\state\\watermarks.json``).
     watermark_path :
         Optional path override used only when ``watermarks`` is not given.
+    config :
+        Optional ``IngestionConfig``. When omitted, module defaults from
+        ``aethelon.ingestion.config`` are used.
     fred_api_key :
         Optional FRED key. When omitted, reads ``FRED_API_KEY`` from the
         environment. A missing key logs a WARNING and skips FRED only.
@@ -85,6 +98,7 @@ class IngestionOrchestrator:
         watermarks: Optional[WatermarkManager] = None,
         *,
         watermark_path: Optional[PathLike] = None,
+        config: Optional[IngestionConfig] = None,
         fred_api_key: Optional[str] = None,
     ) -> None:
         self._owns_http = http is None
@@ -93,6 +107,7 @@ class IngestionOrchestrator:
             self._watermarks = watermarks
         else:
             self._watermarks = WatermarkManager(path=watermark_path)
+        self._config = config if config is not None else default_ingestion_config()
         # Capture constructor override; env is re-read at run time as fallback.
         self._fred_api_key_override = (
             fred_api_key.strip() if isinstance(fred_api_key, str) else fred_api_key
@@ -110,6 +125,11 @@ class IngestionOrchestrator:
     def watermarks(self) -> WatermarkManager:
         """Shared high-water-mark store used by all drivers."""
         return self._watermarks
+
+    @property
+    def config(self) -> IngestionConfig:
+        """Active non-secret ingestion configuration."""
+        return self._config
 
     # ----- lifecycle ---------------------------------------------------------
 
@@ -141,39 +161,45 @@ class IngestionOrchestrator:
     async def run(
         self,
         *,
-        rss_feeds: Optional[
-            Union[Mapping[str, str], Sequence[RssFeedSpec], Sequence[Mapping[str, str]]]
-        ] = None,
-        run_forex_factory: bool = True,
-        fred_series: Optional[Sequence[str]] = None,
+        rss_feeds: Any = _UNSET,
+        run_forex_factory: Any = _UNSET,
+        fred_series: Any = _UNSET,
         fred_api_key: Optional[str] = None,
-        fred_recent_limit: int = 20,
-        fail_soft: bool = True,
+        fred_recent_limit: Any = _UNSET,
+        fail_soft: Any = _UNSET,
     ) -> list[NormalizedItem]:
         """
         Run configured drivers and return a single list of normalized items.
 
+        When a parameter is omitted, the value comes from ``self.config``
+        (module defaults unless a custom ``IngestionConfig`` was injected).
+
+        Explicit overrides:
+
+        * Pass a mapping / sequence for ``rss_feeds`` or ``fred_series`` to
+          replace the config list for this call only.
+        * Pass an **empty** mapping / sequence to skip that source family.
+        * Pass ``run_forex_factory=False`` to skip the calendar fetch.
+
         Parameters
         ----------
         rss_feeds :
-            RSS/Atom sources as ``{name: url}``, a sequence of
-            ``(name, url)`` pairs, or a sequence of mappings with
-            ``name``/``url`` (or ``source_name``/``feed_url``) keys.
-            ``None`` or empty skips RSS.
+            Optional override. Omitted → ``config.rss_feeds``.
+            Empty → skip RSS.
         run_forex_factory :
-            When True (default), fetch the weekly Forex Factory calendar.
+            Optional override. Omitted → ``config.run_forex_factory``.
         fred_series :
-            FRED series ids to pull (e.g. ``[\"CPIAUCSL\", \"FEDFUNDS\"]``).
-            ``None`` or empty skips FRED.
+            Optional override. Omitted → ``config.fred_series``.
+            Empty → skip FRED.
         fred_api_key :
             Per-call key override. Falls back to constructor value, then
-            ``os.environ[\"FRED_API_KEY\"]``. Missing key → WARNING + skip FRED.
+            ``os.environ[FRED_API_KEY_ENV]``. Missing key → WARNING + skip FRED.
+            Never read from config files.
         fred_recent_limit :
-            Passed through to ``FREDDriver.fetch`` when no watermark exists.
+            Optional override. Omitted → ``config.fred_recent_limit``.
         fail_soft :
-            When True (default), a single source failure is logged and the
-            remaining sources continue. When False, the first exception
-            propagates after partial results are abandoned.
+            Optional override. Omitted → ``config.fail_soft``.
+            When True, a single source failure is logged and others continue.
 
         Returns
         -------
@@ -183,42 +209,62 @@ class IngestionOrchestrator:
             or deduplication is applied (callers may do that later).
         """
         await self.open()
+        cfg = self._config
+
+        if rss_feeds is _UNSET:
+            feeds = cfg.rss_feed_specs()
+        else:
+            feeds = self._normalize_rss_feeds(rss_feeds)
+
+        if fred_series is _UNSET:
+            series = cfg.fred_series_ids()
+        else:
+            series = self._normalize_fred_series(fred_series)
+
+        do_ff: bool = (
+            cfg.run_forex_factory if run_forex_factory is _UNSET else bool(run_forex_factory)
+        )
+        recent_limit: int = (
+            int(cfg.fred_recent_limit)
+            if fred_recent_limit is _UNSET
+            else int(fred_recent_limit)
+        )
+        soft: bool = cfg.fail_soft if fail_soft is _UNSET else bool(fail_soft)
 
         collected: list[NormalizedItem] = []
-        feeds = self._normalize_rss_feeds(rss_feeds)
-        series = self._normalize_fred_series(fred_series)
 
         log.info(
             "IngestionOrchestrator start rss=%s ff=%s fred=%s fail_soft=%s",
             len(feeds),
-            run_forex_factory,
+            do_ff,
             len(series),
-            fail_soft,
+            soft,
         )
 
         if feeds:
-            rss_items = await self._run_rss(feeds, fail_soft=fail_soft)
+            rss_items = await self._run_rss(feeds, fail_soft=soft)
             collected.extend(rss_items)
 
-        if run_forex_factory:
-            ff_items = await self._run_forex_factory(fail_soft=fail_soft)
+        if do_ff:
+            ff_items = await self._run_forex_factory(fail_soft=soft)
             collected.extend(ff_items)
 
         if series:
             key = self._resolve_fred_api_key(fred_api_key)
             if not key:
                 log.warning(
-                    "FRED_API_KEY is not set — skipping FRED section "
+                    "%s is not set — skipping FRED section "
                     "(%s series requested). Set the environment variable "
                     "or pass fred_api_key to enable FRED fetches.",
+                    FRED_API_KEY_ENV,
                     len(series),
                 )
             else:
                 fred_items = await self._run_fred(
                     series,
                     api_key=key,
-                    recent_limit=fred_recent_limit,
-                    fail_soft=fail_soft,
+                    recent_limit=recent_limit,
+                    fail_soft=soft,
                 )
                 collected.extend(fred_items)
 
@@ -261,7 +307,11 @@ class IngestionOrchestrator:
 
     async def _run_forex_factory(self, *, fail_soft: bool) -> list[NormalizedItem]:
         """Fetch the weekly economic calendar via ``ForexFactoryDriver``."""
-        driver = ForexFactoryDriver(self._http, self._watermarks)
+        driver = ForexFactoryDriver(
+            self._http,
+            self._watermarks,
+            calendar_url=self._config.forex_factory_url,
+        )
         try:
             items = await driver.fetch()
             log.debug("orchestrator ForexFactory ok new=%s", len(items))
@@ -281,7 +331,12 @@ class IngestionOrchestrator:
         fail_soft: bool,
     ) -> list[NormalizedItem]:
         """Fetch each FRED series via ``FREDDriver``."""
-        driver = FREDDriver(self._http, self._watermarks, api_key=api_key)
+        driver = FREDDriver(
+            self._http,
+            self._watermarks,
+            api_key=api_key,
+            observations_url=self._config.fred_observations_url,
+        )
         out: list[NormalizedItem] = []
         for sid in series_ids:
             try:
@@ -308,13 +363,13 @@ class IngestionOrchestrator:
         """
         Resolve FRED key: per-call override → constructor → environment.
 
-        Never embeds a hardcoded secret.
+        Never embeds a hardcoded secret and never reads keys from config.
         """
         if isinstance(per_call, str) and per_call.strip():
             return per_call.strip()
         if isinstance(self._fred_api_key_override, str) and self._fred_api_key_override.strip():
             return self._fred_api_key_override.strip()
-        return (os.environ.get("FRED_API_KEY") or "").strip()
+        return (os.environ.get(FRED_API_KEY_ENV) or "").strip()
 
     @staticmethod
     def _normalize_rss_feeds(
