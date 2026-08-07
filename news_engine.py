@@ -52,6 +52,7 @@ Version: 5.0
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -61,7 +62,7 @@ import random
 import threading
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import requests
@@ -96,6 +97,25 @@ from event_study_engine import (
     EVENT_STUDY_WINDOWS_SQL,
 )
 from research_desk_data import build_research_desk, get_research_desk_from_context
+
+# Stage B3.4 — soft-wire async ingestion plane (optional; legacy fetch remains fallback)
+try:
+    from aethelon.ingestion import (
+        DEFAULT_FRED_SERIES,
+        DEFAULT_RSS_FEEDS,
+        IngestionConfig,
+        IngestionOrchestrator,
+        default_ingestion_config,
+    )
+
+    _HAS_INGESTION_ORCHESTRATOR = True
+except ImportError:  # pragma: no cover — package missing in odd run layouts
+    DEFAULT_FRED_SERIES = ()  # type: ignore[misc, assignment]
+    DEFAULT_RSS_FEEDS = {}  # type: ignore[misc, assignment]
+    IngestionConfig = Any  # type: ignore[misc, assignment]
+    IngestionOrchestrator = Any  # type: ignore[misc, assignment]
+    default_ingestion_config = None  # type: ignore[assignment]
+    _HAS_INGESTION_ORCHESTRATOR = False
 
 # =============================================================================
 # CONFIGURATION
@@ -332,6 +352,196 @@ def _to_naive(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is not None:
         return datetime.fromtimestamp(dt.timestamp())
     return dt
+
+
+# =============================================================================
+# STAGE B3.4 — IngestionOrchestrator adapter (sync bridge)
+# =============================================================================
+# Listener cycles stay synchronous. These helpers run the async orchestrator
+# in a short-lived worker thread, adapt NormalizedItem rows into the shapes
+# expected by _merge_*, and fall back to the legacy requests/feedparser path
+# on any failure. NLP / storage / GUI code is untouched.
+
+# Set AETHELON_USE_ORCHESTRATOR=0 to force the pre-B3.4 fetch path.
+_ORCH_RSS_TIMEOUT_S = 50.0
+_ORCH_FF_TIMEOUT_S = 25.0
+_ORCH_FRED_TIMEOUT_S = 45.0
+
+
+def _orchestrator_enabled() -> bool:
+    """Return True when the B3 ingestion orchestrator should be preferred."""
+    if not _HAS_INGESTION_ORCHESTRATOR:
+        return False
+    flag = (os.environ.get("AETHELON_USE_ORCHESTRATOR") or "1").strip().lower()
+    return flag not in ("0", "false", "no", "off")
+
+
+def _run_coro_sync(coro: Any, *, timeout: float, label: str) -> Any:
+    """
+    Run an async coroutine from synchronous listener code.
+
+    Always uses a dedicated thread + ``asyncio.run`` so we never collide with
+    a caller that already has an event loop (e.g. future GUI async work).
+    """
+    box: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            box["result"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 — surface to caller
+            box["error"] = exc
+
+    thread = threading.Thread(
+        target=_target,
+        daemon=True,
+        name=f"aethelon-orch-{label}",
+    )
+    thread.start()
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"IngestionOrchestrator {label} timed out after {timeout:.0f}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def _parse_item_datetime(value: Any) -> Optional[datetime]:
+    """Parse orchestrator ISO-Z / datetime fields into naive local wall time."""
+    if isinstance(value, datetime):
+        return _to_naive(value)
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        return _to_naive(datetime.fromisoformat(raw))
+    except ValueError:
+        return None
+
+
+def _news_engine_ingestion_config() -> Any:
+    """
+    Build an ``IngestionConfig`` for live fetches.
+
+    Prefers ``aethelon.ingestion.config`` defaults; falls back to this module's
+    ``RSS_FEEDS`` / ``FRED_SERIES`` keys when the package defaults are empty.
+    """
+    assert default_ingestion_config is not None
+    base = default_ingestion_config()
+    rss = dict(base.rss_feeds) if base.rss_feeds else dict(RSS_FEEDS)
+    if not rss:
+        rss = dict(RSS_FEEDS)
+    series = list(base.fred_series) if base.fred_series else list(FRED_SERIES.keys())
+    if not series:
+        series = list(FRED_SERIES.keys())
+    # Live path historically pulled a short recent window; keep that for cold start.
+    return IngestionConfig(
+        rss_feeds=rss,
+        fred_series=series,
+        fred_series_meta=dict(base.fred_series_meta),
+        forex_factory_url=base.forex_factory_url,
+        fred_observations_url=base.fred_observations_url,
+        fred_recent_limit=5,
+        run_forex_factory=True,
+        fail_soft=True,
+    )
+
+
+def _adapt_rss_normalized(item: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Map an RSS/Atom ``NormalizedItem`` to the legacy store row shape."""
+    title = str(item.get("title") or "").strip()
+    if not title:
+        return None
+    dt = _parse_item_datetime(item.get("datetime"))
+    if dt is None:
+        return None
+    cutoff = datetime.now() - timedelta(hours=_STORE_RETENTION_HOURS)
+    if dt < cutoff:
+        return None
+    return {
+        "source": str(item.get("source") or "RSS"),
+        "title": title,
+        "summary": str(item.get("summary") or ""),
+        "link": str(item.get("link") or ""),
+        "datetime": dt,
+        "impact": int(item.get("impact") or 1),
+    }
+
+
+def _adapt_ff_normalized(item: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Map a Forex Factory ``NormalizedItem`` to the legacy calendar row shape."""
+    title = str(item.get("title") or "").strip()
+    if not title:
+        return None
+    dt = _parse_item_datetime(item.get("datetime"))
+    impact_raw = item.get("impact", 1)
+    try:
+        impact = int(impact_raw) if impact_raw is not None else 1
+    except (TypeError, ValueError):
+        impact = 1
+    raw = item.get("raw")
+    if not isinstance(raw, dict):
+        raw = dict(item)
+    return {
+        "source": str(item.get("source") or "ForexFactory"),
+        "title": title,
+        "currency": str(item.get("currency") or ""),
+        "impact": impact,
+        "forecast": item.get("forecast") if item.get("forecast") is not None else "",
+        "previous": item.get("previous") if item.get("previous") is not None else "",
+        "actual": item.get("actual") if item.get("actual") is not None else "",
+        "datetime": dt,
+        "raw": raw,
+    }
+
+
+def _adapt_fred_normalized_groups(
+    items: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    Group FRED ``NormalizedItem`` rows into ``{series_id: [obs, ...]}``.
+
+    Observation dicts keep the minimal ``date`` / ``value`` keys that
+    ``_merge_fred_series`` already understands.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("series_id") or "").strip().upper()
+        date_s = str(item.get("date") or "")[:10]
+        value = item.get("value")
+        if not sid or not date_s or value in (None, ".", ""):
+            continue
+        grouped.setdefault(sid, []).append({"date": date_s, "value": value})
+    return grouped
+
+
+async def _orchestrator_collect(
+    *,
+    want_rss: bool,
+    want_ff: bool,
+    want_fred: bool,
+) -> list[dict[str, Any]]:
+    """
+    Run ``IngestionOrchestrator`` for the requested source families only.
+
+    Returns raw ``NormalizedItem`` dicts (no store writes).
+    """
+    cfg = _news_engine_ingestion_config()
+    async with IngestionOrchestrator(config=cfg) as orch:
+        items = await orch.run(
+            rss_feeds=dict(cfg.rss_feeds) if want_rss else {},
+            run_forex_factory=want_ff,
+            fred_series=list(cfg.fred_series) if want_fred else [],
+            fred_recent_limit=int(cfg.fred_recent_limit),
+            fail_soft=True,
+        )
+    return list(items or [])
+
 
 # =============================================================================
 # PERSISTENT SESSION STORE
@@ -651,7 +861,37 @@ def _parse_ff_datetime(date_str: str, time_str: str) -> Optional[datetime]:
     return None
 
 def _fetch_ff_calendar() -> list[dict]:
-    """Fetch Forex Factory calendar with 429-aware retry + fallback."""
+    """
+    Fetch Forex Factory calendar events for the live store.
+
+    Preferred path (B3.4): ``IngestionOrchestrator`` + config FF URL.
+    On failure or empty result, falls back to the legacy multi-URL path
+    (and Trading Economics if those also fail).
+    """
+    if _orchestrator_enabled():
+        try:
+            raw_items = _run_coro_sync(
+                _orchestrator_collect(want_rss=False, want_ff=True, want_fred=False),
+                timeout=_ORCH_FF_TIMEOUT_S,
+                label="ff",
+            )
+            events = [
+                adapted
+                for item in (raw_items or [])
+                if isinstance(item, dict)
+                for adapted in (_adapt_ff_normalized(item),)
+                if adapted is not None
+            ]
+            if events:
+                return events
+            print("   [FF] Orchestrator returned no events — trying legacy URLs...")
+        except Exception as exc:
+            print(f"   [FF] Orchestrator path failed ({exc}) — legacy fallback")
+    return _fetch_ff_calendar_legacy()
+
+
+def _fetch_ff_calendar_legacy() -> list[dict]:
+    """Legacy Forex Factory multi-URL fetch with 429-aware retry + TE fallback."""
     events: list[dict] = []
 
     for url in FF_CALENDAR_URLS:
@@ -795,10 +1035,11 @@ def _fred_api_key() -> str:
 
 def _fetch_fred_series(series_id: str, limit: int = 5) -> list[dict]:
     """
-    Fetch recent observations for one FRED series.
+    Fetch recent observations for one FRED series (legacy single-series helper).
 
     Returns an empty list when the API key is missing or the request fails
-    (never raises into the listener loop).
+    (never raises into the listener loop). Prefer ``_fetch_all_fred`` for
+    bulk live refreshes (orchestrator path).
     """
     api_key = _fred_api_key()
     if not api_key:
@@ -824,10 +1065,37 @@ def _fetch_fred_series(series_id: str, limit: int = 5) -> list[dict]:
 
 def _fetch_all_fred() -> dict:
     """
-    Fetch all configured FRED series in parallel.
+    Fetch configured FRED series for the live store.
 
-    If ``FRED_API_KEY`` is unset, returns ``{}`` immediately without network I/O.
+    Preferred path (B3.4): ``IngestionOrchestrator`` using config series ids.
+    ``FRED_API_KEY`` still comes only from the environment; missing key skips
+    FRED entirely. On orchestrator failure, falls back to the legacy
+    threaded ``requests`` path.
     """
+    if not _fred_api_key():
+        return {}
+
+    if _orchestrator_enabled():
+        try:
+            raw_items = _run_coro_sync(
+                _orchestrator_collect(want_rss=False, want_ff=False, want_fred=True),
+                timeout=_ORCH_FRED_TIMEOUT_S,
+                label="fred",
+            )
+            grouped = _adapt_fred_normalized_groups(
+                [item for item in (raw_items or []) if isinstance(item, dict)]
+            )
+            # Empty can be legitimate (no new points past watermark) — do not
+            # fall back in that case; only fall back when the call itself fails.
+            return grouped
+        except Exception as exc:
+            print(f"   [FRED] Orchestrator path failed ({exc}) — legacy fallback")
+
+    return _fetch_all_fred_legacy()
+
+
+def _fetch_all_fred_legacy() -> dict:
+    """Legacy parallel FRED fetch via ``requests`` (pre-B3.4 path)."""
     if not _fred_api_key():
         return {}
 
@@ -840,8 +1108,12 @@ def _fetch_all_fred() -> dict:
             with result_lock:
                 result[sid] = obs
 
+    series_ids = list(FRED_SERIES.keys())
+    if _HAS_INGESTION_ORCHESTRATOR and DEFAULT_FRED_SERIES:
+        # Prefer config order when available; keep engine meta keys as superset.
+        series_ids = list(DEFAULT_FRED_SERIES)
     threads = [
-        threading.Thread(target=_one, args=(sid,), daemon=True) for sid in FRED_SERIES
+        threading.Thread(target=_one, args=(sid,), daemon=True) for sid in series_ids
     ]
     for t in threads:
         t.start()
@@ -864,6 +1136,46 @@ def get_fred_data(force_refresh: bool = False) -> dict:
 # =============================================================================
 
 def _fetch_rss_feeds() -> list[dict]:
+    """
+    Fetch RSS/Atom headlines for the live store.
+
+    Preferred path (B3.4): ``IngestionOrchestrator`` + config feed list.
+    On failure, falls back to the legacy threaded feedparser path.
+    """
+    if _orchestrator_enabled():
+        try:
+            raw_items = _run_coro_sync(
+                _orchestrator_collect(want_rss=True, want_ff=False, want_fred=False),
+                timeout=_ORCH_RSS_TIMEOUT_S,
+                label="rss",
+            )
+            adapted: list[dict] = []
+            for item in raw_items or []:
+                if not isinstance(item, dict):
+                    continue
+                row = _adapt_rss_normalized(item)
+                if row is not None:
+                    adapted.append(row)
+            # Deduplicate by title key (same as legacy path)
+            seen: set[str] = set()
+            unique: list[dict] = []
+            for row in adapted:
+                key = re.sub(r"\W+", "", str(row.get("title", "")).lower())[:60]
+                if key and key not in seen:
+                    seen.add(key)
+                    unique.append(row)
+            return sorted(
+                unique,
+                key=lambda x: x.get("datetime") or datetime.min,
+                reverse=True,
+            )
+        except Exception as exc:
+            print(f"   [RSS] Orchestrator path failed ({exc}) — legacy fallback")
+    return _fetch_rss_feeds_legacy()
+
+
+def _fetch_rss_feeds_legacy() -> list[dict]:
+    """Legacy parallel RSS fetch via ``requests`` + ``feedparser``."""
     items: list[dict] = []
     items_lock = threading.Lock()
     cutoff = datetime.now() - timedelta(hours=_STORE_RETENTION_HOURS)
@@ -871,6 +1183,9 @@ def _fetch_rss_feeds() -> list[dict]:
         **HEADERS,
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
     }
+    feeds = dict(RSS_FEEDS)
+    if _HAS_INGESTION_ORCHESTRATOR and DEFAULT_RSS_FEEDS:
+        feeds = dict(DEFAULT_RSS_FEEDS)
 
     def _pull(name: str, url: str) -> None:
         try:
@@ -912,7 +1227,7 @@ def _fetch_rss_feeds() -> list[dict]:
             pass
 
     threads = [threading.Thread(target=_pull, args=(n, u), daemon=True)
-               for n, u in RSS_FEEDS.items()]
+               for n, u in feeds.items()]
     for t in threads:
         t.start()
     # Global wait cap (not 14s per thread — that made refresh feel frozen)
