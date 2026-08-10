@@ -16,6 +16,7 @@ API keys are resolved only from the environment (or an explicit override).
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import (
@@ -330,15 +331,32 @@ class IngestionOrchestrator:
         recent_limit: int,
         fail_soft: bool,
     ) -> list[NormalizedItem]:
-        """Fetch each FRED series via ``FREDDriver``."""
+        """
+        Fetch each FRED series via ``FREDDriver``.
+
+        Inserts a short pause *between* consecutive series requests
+        (``IngestionConfig.fred_series_pacing_s``, default 0.75s) so bulk
+        pulls stay well under typical FRED rate guidance (~120 req/min).
+        The first series is fetched immediately; retries inside the HTTP
+        client and per-series ``fail_soft`` handling are unchanged.
+        ``FREDDriver`` itself is not modified.
+        """
         driver = FREDDriver(
             self._http,
             self._watermarks,
             api_key=api_key,
             observations_url=self._config.fred_observations_url,
         )
+        pacing_s = float(getattr(self._config, "fred_series_pacing_s", 0.75) or 0.0)
         out: list[NormalizedItem] = []
-        for sid in series_ids:
+        for index, sid in enumerate(series_ids):
+            if index > 0 and pacing_s > 0.0:
+                log.debug(
+                    "orchestrator FRED pacing sleep=%.2fs before series=%s",
+                    pacing_s,
+                    sid,
+                )
+                await asyncio.sleep(pacing_s)
             try:
                 items = await driver.fetch(sid, recent_limit=recent_limit)
                 out.extend(items)

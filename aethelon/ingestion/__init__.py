@@ -15,6 +15,7 @@ from aethelon.ingestion.client import AsyncHttpClient, RetryPolicy
 from aethelon.ingestion.config import (
     DEFAULT_FRED_SERIES,
     DEFAULT_RSS_FEEDS,
+    FRED_API_KEY_ENV,
     FOREX_FACTORY_WEEKLY_URL,
     IngestionConfig,
     default_ingestion_config,
@@ -47,6 +48,7 @@ __all__ = [
     "DEFAULT_RSS_FEEDS",
     "DEFAULT_FRED_SERIES",
     "FOREX_FACTORY_WEEKLY_URL",
+    "FRED_API_KEY_ENV",
     # Drivers
     "BaseDriver",
     "RSSDriver",

@@ -33,6 +33,7 @@ __all__ = [
     "FRED_OBSERVATIONS_URL",
     "FRED_API_KEY_ENV",
     "DEFAULT_FRED_RECENT_LIMIT",
+    "DEFAULT_FRED_SERIES_PACING_S",
     "DEFAULT_RUN_FOREX_FACTORY",
     "DEFAULT_FAIL_SOFT",
     "default_ingestion_config",
@@ -68,6 +69,11 @@ FRED_API_KEY_ENV: str = "FRED_API_KEY"
 DEFAULT_FRED_RECENT_LIMIT: int = 20
 DEFAULT_RUN_FOREX_FACTORY: bool = True
 DEFAULT_FAIL_SOFT: bool = True
+
+# Pause between consecutive FRED series HTTP calls (orchestrator multi-series loop).
+# Keeps bulk pulls comfortably under the common ~120 req/min FRED guidance.
+# Single-series FREDDriver.fetch is unchanged; set 0.0 to disable pacing.
+DEFAULT_FRED_SERIES_PACING_S: float = 0.75
 
 
 # =============================================================================
@@ -185,6 +191,7 @@ class IngestionConfig:
     forex_factory_url: str = FOREX_FACTORY_WEEKLY_URL
     fred_observations_url: str = FRED_OBSERVATIONS_URL
     fred_recent_limit: int = DEFAULT_FRED_RECENT_LIMIT
+    fred_series_pacing_s: float = DEFAULT_FRED_SERIES_PACING_S
     run_forex_factory: bool = DEFAULT_RUN_FOREX_FACTORY
     fail_soft: bool = DEFAULT_FAIL_SOFT
 
@@ -224,6 +231,7 @@ def default_ingestion_config() -> IngestionConfig:
         forex_factory_url=FOREX_FACTORY_WEEKLY_URL,
         fred_observations_url=FRED_OBSERVATIONS_URL,
         fred_recent_limit=DEFAULT_FRED_RECENT_LIMIT,
+        fred_series_pacing_s=DEFAULT_FRED_SERIES_PACING_S,
         run_forex_factory=DEFAULT_RUN_FOREX_FACTORY,
         fail_soft=DEFAULT_FAIL_SOFT,
     )
