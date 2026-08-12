@@ -11,11 +11,13 @@ ENV/
 .idea/
 *.swp
 
-# Local Database / State (DB اصلی الان تو AppData هست)
+# Local database / state (main DB lives in AppData)
 *.db
 *.sqlite3
 
-# Environment variables
+# Environment variables / secrets
 .env
 
+# Local project notes (not for the public repo)
 AGENTS.md
+IDEA.md
