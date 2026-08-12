@@ -1,17 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-aethelon.macro — Stage C causal reasoning & macro logic (contracts first)
+aethelon.macro — Stage C causal reasoning & macro logic
 
-Public surface (C1):
-  • MacroRegime
-  • RegimeResult
-  • HardInvalidationSignal
-  • SoftDivergenceSignal
-  • ExogenousShockSignal
+Public surface:
+  C1 contracts:
+    • MacroRegime, RegimeResult
+    • HardInvalidationSignal, SoftDivergenceSignal, ExogenousShockSignal
+  C2 classifier (pure, offline):
+    • RegimeInputs
+    • classify_regime / classify_regime_from_labels / classify_regime_from_dict
 
-No classification, storage, GUI, or live-data wiring yet.
+No storage, GUI, network, or news_engine wiring.
 """
 
+from aethelon.macro.regime import (
+    RegimeInputs,
+    classify_regime,
+    classify_regime_from_dict,
+    classify_regime_from_labels,
+)
 from aethelon.macro.schemas import (
     ExogenousShockSignal,
     HardInvalidationSignal,
@@ -21,9 +28,15 @@ from aethelon.macro.schemas import (
 )
 
 __all__ = [
+    # C1 contracts
     "MacroRegime",
     "RegimeResult",
     "HardInvalidationSignal",
     "SoftDivergenceSignal",
     "ExogenousShockSignal",
+    # C2 classifier
+    "RegimeInputs",
+    "classify_regime",
+    "classify_regime_from_labels",
+    "classify_regime_from_dict",
 ]
