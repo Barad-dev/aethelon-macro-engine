@@ -12,6 +12,8 @@ Public surface:
   C3 hard invalidation (pure, offline):
     • SeriesChange
     • detect_hard_invalidations / detect_hard_invalidations_from_fred
+  C4 soft divergence (pure, offline):
+    • detect_soft_divergences / detect_soft_divergences_from_fred
 
 No storage, GUI, network, or news_engine wiring.
 """
@@ -20,6 +22,10 @@ from aethelon.macro.hard_invalidation import (
     SeriesChange,
     detect_hard_invalidations,
     detect_hard_invalidations_from_fred,
+)
+from aethelon.macro.soft_divergence import (
+    detect_soft_divergences,
+    detect_soft_divergences_from_fred,
 )
 from aethelon.macro.regime import (
     RegimeInputs,
@@ -51,4 +57,7 @@ __all__ = [
     "SeriesChange",
     "detect_hard_invalidations",
     "detect_hard_invalidations_from_fred",
+    # C4 soft divergence
+    "detect_soft_divergences",
+    "detect_soft_divergences_from_fred",
 ]
