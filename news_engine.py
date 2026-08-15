@@ -97,6 +97,9 @@ from event_study_engine import (
     EVENT_STUDY_WINDOWS_SQL,
 )
 from research_desk_data import build_research_desk, get_research_desk_from_context
+from utils.logger import get_logger
+
+log = get_logger(__name__)
 
 # Stage B3.4 — soft-wire async ingestion plane (optional; legacy fetch remains fallback)
 try:
@@ -883,10 +886,11 @@ def _fetch_ff_calendar() -> list[dict]:
                 if adapted is not None
             ]
             if events:
+                log.info("FF fetch via orchestrator: %s events", len(events))
                 return events
-            print("   [FF] Orchestrator returned no events — trying legacy URLs...")
+            log.warning("FF orchestrator returned no events — trying legacy URLs")
         except Exception as exc:
-            print(f"   [FF] Orchestrator path failed ({exc}) — legacy fallback")
+            log.warning("FF orchestrator path failed (%s) — legacy fallback", exc)
     return _fetch_ff_calendar_legacy()
 
 
@@ -958,11 +962,11 @@ def _fetch_ff_calendar_legacy() -> list[dict]:
 
     # ── Fallback: if FF completely failed, try Trading Economics ──
     if not events:
-        print("   [FF] ⚠ All FF URLs failed — trying fallback (Trading Economics)...")
+        log.warning("FF legacy URLs failed — trying Trading Economics fallback")
         events = _fetch_te_fallback()
 
     if not events:
-        print("   [FF] ⚠ No calendar data from any source this cycle.")
+        log.warning("FF cycle: no calendar data from any source")
 
     return events
 
@@ -1026,8 +1030,8 @@ def _fred_api_key() -> str:
     FRED_API_KEY = key
     if not key and not _FRED_KEY_WARNED:
         _FRED_KEY_WARNED = True
-        print(
-            "   [FRED] WARNING: FRED_API_KEY is not set in the environment. "
+        log.warning(
+            "FRED_API_KEY is not set in the environment. "
             "FRED fetches will be skipped until the key is provided."
         )
     return key
@@ -1087,9 +1091,13 @@ def _fetch_all_fred() -> dict:
             )
             # Empty can be legitimate (no new points past watermark) — do not
             # fall back in that case; only fall back when the call itself fails.
+            log.info(
+                "FRED fetch via orchestrator: %s series",
+                len(grouped),
+            )
             return grouped
         except Exception as exc:
-            print(f"   [FRED] Orchestrator path failed ({exc}) — legacy fallback")
+            log.warning("FRED orchestrator path failed (%s) — legacy fallback", exc)
 
     return _fetch_all_fred_legacy()
 
@@ -1164,13 +1172,15 @@ def _fetch_rss_feeds() -> list[dict]:
                 if key and key not in seen:
                     seen.add(key)
                     unique.append(row)
-            return sorted(
+            unique_sorted = sorted(
                 unique,
                 key=lambda x: x.get("datetime") or datetime.min,
                 reverse=True,
             )
+            log.info("RSS fetch via orchestrator: %s items", len(unique_sorted))
+            return unique_sorted
         except Exception as exc:
-            print(f"   [RSS] Orchestrator path failed ({exc}) — legacy fallback")
+            log.warning("RSS orchestrator path failed (%s) — legacy fallback", exc)
     return _fetch_rss_feeds_legacy()
 
 
@@ -1310,8 +1320,10 @@ def _listener_cycle_ff() -> None:
             state["last_note"] = (f"+{added} new" if added else "no change") + f" · event_study skip"
             print(f"   [EVENT_STUDY] capture skipped: {es_exc}")
         state["last_success"] = datetime.now()
+        log.info("FF cycle ok: %s", state.get("last_note"))
     except Exception as exc:
         state["last_note"] = f"skipped ({exc})"
+        log.warning("FF cycle failed: %s", exc)
 
 def _listener_cycle_rss() -> None:
     state = _SOURCE_STATE["rss"]
@@ -1321,8 +1333,10 @@ def _listener_cycle_rss() -> None:
         added = _merge_rss_items(items)
         state["last_success"] = datetime.now()
         state["last_note"] = f"+{added} new" if added else "no change"
+        log.info("RSS cycle ok: %s", state["last_note"])
     except Exception as exc:
         state["last_note"] = f"skipped ({exc})"
+        log.warning("RSS cycle failed: %s", exc)
 
 def _listener_cycle_fred() -> None:
     state = _SOURCE_STATE["fred"]
@@ -1330,6 +1344,7 @@ def _listener_cycle_fred() -> None:
     try:
         if not _fred_api_key():
             state["last_note"] = "skipped (FRED_API_KEY not set)"
+            log.info("FRED cycle skipped: FRED_API_KEY not set")
             return
         data = _fetch_all_fred()
         for sid, obs in data.items():
@@ -1351,8 +1366,10 @@ def _listener_cycle_fred() -> None:
         else:
             state["last_success"] = datetime.now()
             state["last_note"] = "no change"
+        log.info("FRED cycle ok: %s", state.get("last_note"))
     except Exception as exc:
         state["last_note"] = f"skipped ({exc})"
+        log.warning("FRED cycle failed: %s", exc)
 
 def _listener_cycle_extra() -> None:
     state = _SOURCE_STATE["extra"]
@@ -1368,7 +1385,7 @@ def _listener_cycle_extra() -> None:
 def _listener_loop(poll_tick_seconds: int = 5) -> None:
     global _listener_started_at
     _listener_started_at = datetime.now()
-    print("   [NEWS/LISTENER] Always-on news listener started (v5.0 Context-Aware).")
+    log.info("News listener started (v5.0 context-aware)")
 
     # Skip redundant first-pass if force_refresh already populated sources
     # (last_success within the last 90 seconds).
@@ -1401,11 +1418,11 @@ def _listener_loop(poll_tick_seconds: int = 5) -> None:
                 try:
                     cycle_fn()
                 except Exception as exc:
-                    print(f"   [NEWS/LISTENER] {name} cycle crashed: {exc}")
+                    log.exception("Listener %s cycle crashed: %s", name, exc)
                     state["last_note"] = f"crashed ({exc})"
         _listener_stop.wait(poll_tick_seconds)
 
-    print("   [NEWS/LISTENER] Listener stopped.")
+    log.info("News listener stopped")
 
 def start_news_listener() -> None:
     global _listener_thread
@@ -1785,7 +1802,7 @@ def get_news_context(force_refresh: bool = False,
             "generated_at":        datetime.now(),
         }
     except Exception as exc:
-        print(f"   [NEWS] get_news_context degraded this cycle: {exc}")
+        log.exception("get_news_context degraded this cycle: %s", exc)
         return {
             "ff_analyzed": [], "rss_analyzed": [], "fred_narratives": [],
             "macro_state": {}, "instrument_theses": [], "research_desk": {},
