@@ -22,6 +22,9 @@ Public surface:
     • regime_inputs_from_macro_state
     • fred_map_from_observations / series_changes_from_fred_map
     • build_stage_c_inputs
+  C6.2 offline runner:
+    • StageCResult
+    • run_stage_c
 
 No storage, GUI, network, or news_engine wiring.
 """
@@ -38,6 +41,7 @@ from aethelon.macro.hard_invalidation import (
     detect_hard_invalidations,
     detect_hard_invalidations_from_fred,
 )
+from aethelon.macro.runner import StageCResult, run_stage_c
 from aethelon.macro.shock import (
     ShockEvent,
     isolate_exogenous_shocks,
@@ -90,4 +94,7 @@ __all__ = [
     "fred_map_from_observations",
     "series_changes_from_fred_map",
     "build_stage_c_inputs",
+    # C6.2 runner
+    "StageCResult",
+    "run_stage_c",
 ]
