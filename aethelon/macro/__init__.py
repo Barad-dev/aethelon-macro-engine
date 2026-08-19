@@ -25,10 +25,13 @@ Public surface:
   C6.2 offline runner:
     • StageCResult
     • run_stage_c
+  C6.3 soft connection (read-only):
+    • stage_c_from_context
 
 No storage, GUI, network, or news_engine wiring.
 """
 
+from aethelon.macro.connect import stage_c_from_context
 from aethelon.macro.bridge import (
     StageCInputs,
     build_stage_c_inputs,
@@ -97,4 +100,6 @@ __all__ = [
     # C6.2 runner
     "StageCResult",
     "run_stage_c",
+    # C6.3 soft connection
+    "stage_c_from_context",
 ]
