@@ -27,11 +27,15 @@ Public surface:
     • run_stage_c
   C6.3 soft connection (read-only):
     • stage_c_from_context
+  Stage D analysis package:
+    • AnalysisPackage
+    • assemble_analysis_package
 
 No storage, GUI, network, or news_engine wiring.
 """
 
 from aethelon.macro.connect import stage_c_from_context
+from aethelon.macro.package import AnalysisPackage, assemble_analysis_package
 from aethelon.macro.bridge import (
     StageCInputs,
     build_stage_c_inputs,
@@ -102,4 +106,7 @@ __all__ = [
     "run_stage_c",
     # C6.3 soft connection
     "stage_c_from_context",
+    # Stage D analysis package
+    "AnalysisPackage",
+    "assemble_analysis_package",
 ]
