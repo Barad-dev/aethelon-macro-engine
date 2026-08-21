@@ -9,17 +9,19 @@ This module does **not**:
   * import ``news_engine`` or GUI
   * write to SQLite
   * parse headlines
-  * assign calm / watch / alert labels (next Stage D step)
+  * invent new detectors
 
 Assembly is a thin wrap around existing Stage C helpers
-(:func:`aethelon.macro.connect.stage_c_from_context`). Incomplete inputs
-yield a valid empty or partial package; assembly never raises to callers.
+(:func:`aethelon.macro.connect.stage_c_from_context`). Consumer status
+(``CALM`` / ``WATCH`` / ``ALERT`` / ``SHOCK``) is filled from the
+resulting signal lists. Incomplete inputs yield a valid empty or
+partial package; assembly never raises to callers.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Optional, Union
+from typing import Any, Iterable, Literal, Mapping, Optional, Sequence, Union
 
 from pydantic import Field, field_validator
 
@@ -39,6 +41,13 @@ from aethelon.macro.shock import ShockEvent
 
 log = get_logger(__name__)
 
+ConsumerStatus = Literal["CALM", "WATCH", "ALERT", "SHOCK"]
+
+_STATUS_CALM: ConsumerStatus = "CALM"
+_STATUS_WATCH: ConsumerStatus = "WATCH"
+_STATUS_ALERT: ConsumerStatus = "ALERT"
+_STATUS_SHOCK: ConsumerStatus = "SHOCK"
+
 
 def _now_utc_z() -> str:
     return (
@@ -52,8 +61,8 @@ class AnalysisPackage(_MacroBase):
     """
     Reusable analysis snapshot assembled from Stage C outputs.
 
-    ``status`` / ``status_note`` are reserved short text slots for a later
-    Stage D step. They stay empty here so this contract can ship first.
+    ``status`` is one of ``CALM`` / ``WATCH`` / ``ALERT`` / ``SHOCK``.
+    ``status_note`` is one short sentence explaining that label.
     """
 
     regime: Optional[RegimeResult] = Field(
@@ -78,11 +87,11 @@ class AnalysisPackage(_MacroBase):
     )
     status: str = Field(
         default="",
-        description="Reserved short status label; empty until the next Stage D step",
+        description="Consumer label: CALM | WATCH | ALERT | SHOCK",
     )
     status_note: str = Field(
         default="",
-        description="Reserved one-line status text; empty until the next Stage D step",
+        description="One short sentence explaining status",
     )
     errors: list[str] = Field(
         default_factory=list,
@@ -111,30 +120,118 @@ class AnalysisPackage(_MacroBase):
         return _str_list(v)
 
 
+def _is_active(signal: Any) -> bool:
+    """Missing ``active`` counts as True (C3/C5 default)."""
+    flag = getattr(signal, "active", True)
+    return bool(flag)
+
+
+def _lead_title(signals: Sequence[Any], *, score_attr: str) -> str:
+    """Title of the highest-scoring signal; fallback if title is blank."""
+
+    def _score(item: Any) -> float:
+        raw = getattr(item, score_attr, None)
+        try:
+            return float(raw) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    lead = max(signals, key=_score)
+    title = str(getattr(lead, "title", "") or "").strip()
+    return title or "unspecified"
+
+
+def _count_note(kind_one: str, kind_many: str, items: Sequence[Any], *, score_attr: str) -> str:
+    title = _lead_title(items, score_attr=score_attr)
+    if len(items) == 1:
+        return f"{kind_one}: {title}."
+    return f"{len(items)} {kind_many}; leading: {title}."
+
+
+def _status_for(
+    shocks: Sequence[ExogenousShockSignal],
+    hard: Sequence[HardInvalidationSignal],
+    soft: Sequence[SoftDivergenceSignal],
+) -> tuple[ConsumerStatus, str]:
+    """
+    Closed-set consumer label from existing signal lists.
+
+    Priority (first match wins):
+      1. any active shock → SHOCK
+      2. any active hard invalidation → ALERT
+      3. any soft divergence → WATCH
+      4. otherwise CALM
+    """
+    active_shocks = [s for s in shocks if _is_active(s)]
+    if active_shocks:
+        return (
+            _STATUS_SHOCK,
+            _count_note(
+                "Active exogenous shock",
+                "active exogenous shocks",
+                active_shocks,
+                score_attr="severity",
+            ),
+        )
+
+    active_hard = [s for s in hard if _is_active(s)]
+    if active_hard:
+        return (
+            _STATUS_ALERT,
+            _count_note(
+                "Hard invalidation",
+                "hard invalidations",
+                active_hard,
+                score_attr="severity",
+            ),
+        )
+
+    if soft:
+        return (
+            _STATUS_WATCH,
+            _count_note(
+                "Soft divergence",
+                "soft divergences",
+                soft,
+                score_attr="strength",
+            ),
+        )
+
+    return (
+        _STATUS_CALM,
+        "No shocks, hard breaks, or soft divergences.",
+    )
+
+
 def _from_stage_c_result(result: StageCResult) -> AnalysisPackage:
-    """Map a Stage C snapshot onto the package contract (status fields empty)."""
+    """Map a Stage C snapshot onto the package contract and fill status."""
     as_of = _to_utc_z(result.as_of) or _now_utc_z()
+    hard = list(result.hard_invalidations)
+    soft = list(result.soft_divergences)
+    shocks = list(result.shocks)
+    status, status_note = _status_for(shocks, hard, soft)
     return AnalysisPackage(
         regime=result.regime,
-        hard_invalidations=list(result.hard_invalidations),
-        soft_divergences=list(result.soft_divergences),
-        shocks=list(result.shocks),
+        hard_invalidations=hard,
+        soft_divergences=soft,
+        shocks=shocks,
         as_of=as_of,
-        status="",
-        status_note="",
+        status=status,
+        status_note=status_note,
         errors=list(result.errors),
     )
 
 
 def _empty_package(*, as_of: str, errors: list[str]) -> AnalysisPackage:
+    status, status_note = _status_for((), (), ())
     return AnalysisPackage(
         regime=None,
         hard_invalidations=[],
         soft_divergences=[],
         shocks=[],
         as_of=as_of,
-        status="",
-        status_note="",
+        status=status,
+        status_note=status_note,
         errors=errors,
     )
 
@@ -150,8 +247,8 @@ def assemble_analysis_package(
     """
     Assemble an ``AnalysisPackage`` from existing in-memory engine shapes.
 
-    Calls :func:`stage_c_from_context` only (bridge + C2–C5 runner). Does
-    not invent status labels.
+    Calls :func:`stage_c_from_context` only (bridge + C2–C5 runner), then
+    fills ``status`` / ``status_note`` from the signal lists.
 
     Parameters
     ----------
@@ -173,7 +270,7 @@ def assemble_analysis_package(
     -------
     AnalysisPackage
         Always a concrete object. Incomplete data yields empty or partial
-        lists and empty status text. Assembly failures are recorded in
+        lists and ``CALM`` status. Assembly failures are recorded in
         ``errors`` rather than raised.
     """
     try:
@@ -192,11 +289,12 @@ def assemble_analysis_package(
 
     package = _from_stage_c_result(result)
     log.info(
-        "package: as_of=%s regime=%s hard=%s soft=%s shocks=%s errors=%s",
+        "package: as_of=%s regime=%s status=%s hard=%s soft=%s shocks=%s errors=%s",
         package.as_of,
         None
         if package.regime is None
         else getattr(package.regime.regime, "value", package.regime.regime),
+        package.status,
         len(package.hard_invalidations),
         len(package.soft_divergences),
         len(package.shocks),
