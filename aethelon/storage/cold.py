@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Union
 
 from aethelon.core.logger import get_logger
+from aethelon.storage.timeutil import utc_now_iso_z
 
 __all__ = ["ColdVault", "default_cold_vault_dir"]
 
@@ -60,6 +61,20 @@ class ColdVault:
     def is_ready(self) -> bool:
         """True when the vault can archive and retrieve. Stub: always False."""
         return False
+
+    def readiness(self) -> dict[str, Any]:
+        """
+        Tiny status blob for later wiring.
+
+        Stub always reports ``ready=False`` with reason ``stub``.
+        ``checked_at`` is ISO 8601 UTC Z.
+        """
+        return {
+            "ready": False,
+            "reason": "stub",
+            "vault_dir": str(self._vault_dir),
+            "checked_at": utc_now_iso_z(),
+        }
 
     def archive(self, payload: Mapping[str, Any]) -> None:
         """

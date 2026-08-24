@@ -2,7 +2,8 @@
 """
 scripts/test_storage_foundation.py — Stage D storage foundation check
 ====================================================================
-Offline checks for L1 HotCache, L2 WarmStore (WAL open), and L3 ColdVault
+Offline checks for L1 HotCache (including namespaced snapshots), L2
+WarmStore (WAL open, health, guarded query/execute), and L3 ColdVault
 stub. Uses a temporary SQLite file. Does not open the live AppData DB,
 does not import news_engine, and does not touch the GUI.
 
@@ -28,8 +29,12 @@ from aethelon.core.logger import get_logger  # noqa: E402
 from aethelon.storage import (  # noqa: E402
     ColdVault,
     HotCache,
+    LatestSnapshot,
+    StorageError,
     StorageFoundation,
+    WarmHealth,
     WarmStore,
+    cache_key,
     default_storage,
     default_warm_db_path,
     parse_iso_utc,
@@ -204,6 +209,99 @@ def _utc_helper() -> CheckResult:
     return CheckResult("utc_helper", True, stamp)
 
 
+def _l1_namespace_and_latest() -> CheckResult:
+    cache = HotCache()
+    if cache_key("dashboard", "live") != "dashboard/live":
+        return CheckResult("l1_namespace_and_latest", False, "cache_key shape")
+    cache.put_ns("desk", "regime", "GOLDILOCKS")
+    rec = cache.put_latest("live", {"status": "CALM"})
+    if not isinstance(rec, LatestSnapshot) or not _as_of_ok(rec.as_of):
+        return CheckResult("l1_namespace_and_latest", False, f"bad latest {rec!r}")
+    payload = {"status": "CALM"}
+    rec.payload["status"] = "mutated"
+    payload["status"] = "mutated"
+    got = cache.get_latest("live")
+    if got is None or got.payload.get("status") != "CALM":
+        return CheckResult("l1_namespace_and_latest", False, "payload mutation leaked")
+    if cache.get_ns("desk", "regime") != "GOLDILOCKS":
+        return CheckResult("l1_namespace_and_latest", False, "namespace get missed")
+    if cache.keys_in("desk") != ["desk/regime"]:
+        return CheckResult("l1_namespace_and_latest", False, f"keys_in={cache.keys_in('desk')}")
+    removed = cache.clear_namespace("desk")
+    if removed != 1 or cache.get_latest("live") is None:
+        return CheckResult("l1_namespace_and_latest", False, "clear_namespace was not scoped")
+    dash = cache.put_dashboard({"ok": True})
+    if cache.get_dashboard() is None or dash.name != "live":
+        return CheckResult("l1_namespace_and_latest", False, "dashboard helpers failed")
+    return CheckResult("l1_namespace_and_latest", True, f"as_of={rec.as_of}")
+
+
+def _l2_health_and_helpers() -> CheckResult:
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "not-yet.db"
+        ghost = WarmStore(db_path=missing, migrate=False)
+        before = ghost.health()
+        if before.exists or missing.is_file() or before.ok:
+            return CheckResult("l2_health_and_helpers", False, "health created a missing file")
+        if not _as_of_ok(before.checked_at):
+            return CheckResult("l2_health_and_helpers", False, "health checked_at not UTC Z")
+
+        db = Path(tmp) / "helpers.db"
+        store = WarmStore(db_path=db, migrate=False)
+        store.execute(
+            "CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY, note TEXT)"
+        )
+        n = store.execute("INSERT INTO probe (note) VALUES (?)", ("keep-me",))
+        if n != 1:
+            return CheckResult("l2_health_and_helpers", False, f"insert rowcount={n}")
+        rows = store.query("SELECT note FROM probe WHERE id = ?", (1,))
+        if rows != [("keep-me",)]:
+            return CheckResult("l2_health_and_helpers", False, f"query={rows!r}")
+        report = store.health()
+        if not isinstance(report, WarmHealth) or not report.ok or report.table_count < 1:
+            return CheckResult("l2_health_and_helpers", False, f"health={report!r}")
+        if "probe" not in store.table_names():
+            return CheckResult("l2_health_and_helpers", False, "table_names missed probe")
+        return CheckResult("l2_health_and_helpers", True, f"wal={report.journal_mode} tables={report.table_count}")
+
+
+def _l2_refuses_destructive_sql() -> CheckResult:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "guard.db"
+        store = WarmStore(db_path=db, migrate=False)
+        store.execute("CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY, note TEXT)")
+        store.execute("INSERT INTO probe (note) VALUES (?)", ("keep-me",))
+        for sql in (
+            "DELETE FROM probe",
+            "DROP TABLE probe",
+            "ALTER TABLE probe ADD COLUMN x TEXT",
+            "SELECT 1; DROP TABLE probe",
+            "INSERT INTO probe (note) VALUES ('x'); DELETE FROM probe",
+        ):
+            try:
+                if sql.strip().upper().startswith("SELECT"):
+                    store.query(sql)
+                else:
+                    store.execute(sql)
+            except StorageError:
+                continue
+            return CheckResult("l2_refuses_destructive_sql", False, f"allowed {sql!r}")
+        rows = store.query("SELECT note FROM probe")
+        if rows != [("keep-me",)]:
+            return CheckResult("l2_refuses_destructive_sql", False, "row changed after refused SQL")
+        return CheckResult("l2_refuses_destructive_sql", True, "DROP/DELETE/ALTER/multi-statement refused")
+
+
+def _l3_readiness() -> CheckResult:
+    vault = ColdVault(vault_dir=Path("unused-vault"))
+    info = vault.readiness()
+    if info.get("ready") is not False or info.get("reason") != "stub":
+        return CheckResult("l3_readiness", False, f"readiness={info!r}")
+    if not _as_of_ok(info.get("checked_at")):
+        return CheckResult("l3_readiness", False, f"checked_at={info.get('checked_at')!r}")
+    return CheckResult("l3_readiness", True, "ready=False reason=stub")
+
+
 def _journal_mode(conn: sqlite3.Connection) -> str:
     row = conn.execute("PRAGMA journal_mode;").fetchone()
     return str(row[0]).lower() if row else ""
@@ -217,8 +315,12 @@ def main() -> int:
         _l2_does_not_wipe_rows,
         _l2_default_path_matches_helpers,
         _l3_stub_is_inert,
+        _l3_readiness,
         _foundation_assembles,
         _utc_helper,
+        _l1_namespace_and_latest,
+        _l2_health_and_helpers,
+        _l2_refuses_destructive_sql,
     ]
     results = [_run_case(fn.__name__, fn) for fn in cases]
     ok_n = sum(1 for r in results if r.ok)
