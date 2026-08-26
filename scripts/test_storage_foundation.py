@@ -2,10 +2,10 @@
 """
 scripts/test_storage_foundation.py — Stage D storage foundation check
 ====================================================================
-Offline checks for L1 HotCache (including namespaced snapshots), L2
-WarmStore (WAL open, health, guarded query/execute), and L3 ColdVault
-stub. Uses a temporary SQLite file. Does not open the live AppData DB,
-does not import news_engine, and does not touch the GUI.
+Offline checks for L1 HotCache, L2 WarmStore (WAL + helpers), and L3
+ColdVault (gzip JSON archive/retrieve). Uses a temporary SQLite file
+and temp vault. Does not open the live AppData DB, does not import
+news_engine, and does not touch the GUI.
 
 Usage
 -----
@@ -33,6 +33,7 @@ from aethelon.storage import (  # noqa: E402
     StorageError,
     StorageFoundation,
     WarmHealth,
+    VaultRecord,
     WarmStore,
     cache_key,
     default_storage,
@@ -168,17 +169,6 @@ def _l2_default_path_matches_helpers() -> CheckResult:
     return CheckResult("l2_default_path_matches_helpers", True, str(got))
 
 
-def _l3_stub_is_inert() -> CheckResult:
-    vault = ColdVault(vault_dir=Path("unused-vault"))
-    if vault.is_ready():
-        return CheckResult("l3_stub_is_inert", False, "stub reported ready")
-    vault.archive({"kind": "test"})
-    found = vault.retrieve({"kind": "test"})
-    if found:
-        return CheckResult("l3_stub_is_inert", False, f"stub returned {found!r}")
-    return CheckResult("l3_stub_is_inert", True, "archive/retrieve no-ops, is_ready=False")
-
-
 def _foundation_assembles() -> CheckResult:
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "stack.db"
@@ -194,11 +184,12 @@ def _foundation_assembles() -> CheckResult:
             )
         if stack.warm.ensure_wal() != "wal":
             return CheckResult("foundation_assembles", False, "stack L2 not WAL")
-        if stack.cold.is_ready():
-            return CheckResult("foundation_assembles", False, "stack L3 should be stub")
         stack.hot.put("ping", 1)
         if stack.hot.get("ping") != 1:
             return CheckResult("foundation_assembles", False, "stack L1 missed put")
+        rec = stack.cold.archive({"kind": "probe", "id": "one", "payload": {"n": 1}})
+        if not isinstance(rec, VaultRecord) or not stack.cold.is_ready():
+            return CheckResult("foundation_assembles", False, "L3 archive/ready failed")
         return CheckResult("foundation_assembles", True, f"assembled_at={stack.assembled_at}")
 
 
@@ -293,13 +284,92 @@ def _l2_refuses_destructive_sql() -> CheckResult:
 
 
 def _l3_readiness() -> CheckResult:
-    vault = ColdVault(vault_dir=Path("unused-vault"))
-    info = vault.readiness()
-    if info.get("ready") is not False or info.get("reason") != "stub":
-        return CheckResult("l3_readiness", False, f"readiness={info!r}")
-    if not _as_of_ok(info.get("checked_at")):
-        return CheckResult("l3_readiness", False, f"checked_at={info.get('checked_at')!r}")
-    return CheckResult("l3_readiness", True, "ready=False reason=stub")
+    with tempfile.TemporaryDirectory() as tmp:
+        vault = ColdVault(vault_dir=Path(tmp) / "cold")
+        if vault.is_ready():
+            return CheckResult("l3_readiness", False, "missing vault should not be ready")
+        info = vault.readiness()
+        if info.get("ready") is not True or info.get("reason") != "ok":
+            return CheckResult("l3_readiness", False, f"readiness={info!r}")
+        if not _as_of_ok(info.get("checked_at")):
+            return CheckResult("l3_readiness", False, f"checked_at={info.get('checked_at')!r}")
+        if not vault.is_ready():
+            return CheckResult("l3_readiness", False, "ensure via readiness did not create dir")
+        return CheckResult("l3_readiness", True, "ready=True reason=ok")
+
+
+def _l3_archive_retrieve() -> CheckResult:
+    with tempfile.TemporaryDirectory() as tmp:
+        vault = ColdVault(vault_dir=Path(tmp) / "cold")
+        first = vault.archive({"kind": "regime", "id": "goldilocks", "payload": {"name": "GOLDILOCKS"}})
+        vault.archive({"kind": "regime", "id": "stagflation", "payload": {"name": "STAGFLATION"}})
+        vault.archive({"kind": "shock", "id": "geo-1", "payload": {"tag": "geo"}})
+        if not isinstance(first, VaultRecord) or not _as_of_ok(first.archived_at):
+            return CheckResult("l3_archive_retrieve", False, f"bad record {first!r}")
+        gz = Path(first.path)
+        if gz.suffixes[-2:] != [".json", ".gz"] or not gz.is_file():
+            return CheckResult("l3_archive_retrieve", False, f"expected .json.gz at {gz}")
+        by_id = vault.retrieve({"kind": "regime", "id": "goldilocks"})
+        if len(by_id) != 1 or by_id[0].payload.get("name") != "GOLDILOCKS":
+            return CheckResult("l3_archive_retrieve", False, f"by id={by_id!r}")
+        by_kind = vault.retrieve({"kind": "regime"})
+        if {r.id for r in by_kind} != {"goldilocks", "stagflation"}:
+            return CheckResult("l3_archive_retrieve", False, f"by kind={[r.id for r in by_kind]}")
+        recent = vault.retrieve({"limit": 2})
+        if len(recent) != 2:
+            return CheckResult("l3_archive_retrieve", False, f"recent count={len(recent)}")
+        missing = vault.retrieve({"kind": "regime", "id": "nope"})
+        if missing:
+            return CheckResult("l3_archive_retrieve", False, "missing id should be empty")
+        return CheckResult("l3_archive_retrieve", True, f"archived_at={first.archived_at}")
+
+
+def _l3_does_not_touch_l2() -> CheckResult:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "warm.db"
+        store = WarmStore(db_path=db, migrate=False)
+        store.execute("CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY, note TEXT)")
+        store.execute("INSERT INTO probe (note) VALUES (?)", ("keep-me",))
+        vault = ColdVault(vault_dir=Path(tmp) / "cold")
+        vault.archive({"kind": "probe", "id": "x", "payload": {"note": "cold"}})
+        rows = store.query("SELECT note FROM probe")
+        if rows != [("keep-me",)]:
+            return CheckResult("l3_does_not_touch_l2", False, f"L2 rows changed: {rows!r}")
+        if "probe" not in store.table_names():
+            return CheckResult("l3_does_not_touch_l2", False, "L2 table missing after L3 archive")
+        return CheckResult("l3_does_not_touch_l2", True, "L2 probe row intact")
+
+
+def _stack_three_layers() -> CheckResult:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "stack.db"
+        vault_dir = Path(tmp) / "cold"
+        stack = default_storage(db_path=db, vault_dir=vault_dir, migrate=False)
+        dash = stack.hot.put_dashboard({"status": "CALM"})
+        if not _as_of_ok(dash.as_of) or stack.hot.get_dashboard() is None:
+            return CheckResult("stack_three_layers", False, "L1 dashboard failed")
+        stack.warm.execute(
+            "CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY, note TEXT)"
+        )
+        stack.warm.execute("INSERT INTO probe (note) VALUES (?)", ("keep-me",))
+        if stack.warm.health().journal_mode != "wal":
+            return CheckResult("stack_three_layers", False, "L2 not WAL")
+        rec = stack.cold.archive(
+            {"kind": "regime", "id": "goldilocks", "payload": {"name": "GOLDILOCKS"}}
+        )
+        found = stack.cold.retrieve({"kind": "regime", "id": "goldilocks"})
+        if not found or found[0].payload.get("name") != "GOLDILOCKS":
+            return CheckResult("stack_three_layers", False, f"L3 retrieve={found!r}")
+        rows = stack.warm.query("SELECT note FROM probe")
+        if rows != [("keep-me",)]:
+            return CheckResult("stack_three_layers", False, "L2 wiped during stack run")
+        if stack.hot.get_dashboard() is None:
+            return CheckResult("stack_three_layers", False, "L1 lost dashboard")
+        return CheckResult(
+            "stack_three_layers",
+            True,
+            f"L1 as_of={dash.as_of} L3 as_of={rec.archived_at}",
+        )
 
 
 def _journal_mode(conn: sqlite3.Connection) -> str:
@@ -314,9 +384,11 @@ def main() -> int:
         _l2_wal_on_temp_db,
         _l2_does_not_wipe_rows,
         _l2_default_path_matches_helpers,
-        _l3_stub_is_inert,
         _l3_readiness,
+        _l3_archive_retrieve,
+        _l3_does_not_touch_l2,
         _foundation_assembles,
+        _stack_three_layers,
         _utc_helper,
         _l1_namespace_and_latest,
         _l2_health_and_helpers,

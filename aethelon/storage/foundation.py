@@ -24,9 +24,9 @@ class StorageFoundation:
     """
     The three Stage D layers in one place.
 
-    No cache policy, no archive pipeline, no GUI feed. Callers that
-    need a live stack can take this object later without changing
-    construction.
+    L1 snapshots, L2 WAL helpers, and L3 gzip archive. No GUI feed
+    and no news_engine rewrite. Callers that need a live stack can
+    take this object later without changing construction.
     """
 
     hot: HotCache

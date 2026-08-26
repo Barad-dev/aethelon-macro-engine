@@ -12,8 +12,9 @@ Public surface
     • WarmStore
     • WarmHealth
     • default_warm_db_path
-  L3 Cold Vault (long-term archive; stub in this phase):
+  L3 Cold Vault (gzip JSON archive under AppData data/cold_vault):
     • ColdVault
+    • VaultRecord
     • default_cold_vault_dir
   Stack:
     • StorageFoundation
@@ -25,7 +26,7 @@ Public surface
 No GUI wiring, no news_engine rewrite, no user-data wipe.
 """
 
-from aethelon.storage.cold import ColdVault, default_cold_vault_dir
+from aethelon.storage.cold import ColdVault, VaultRecord, default_cold_vault_dir
 from aethelon.storage.exceptions import StorageError
 from aethelon.storage.foundation import StorageFoundation, default_storage
 from aethelon.storage.hot import (
@@ -47,6 +48,7 @@ __all__ = [
     "WarmStore",
     "WarmHealth",
     "ColdVault",
+    "VaultRecord",
     "StorageFoundation",
     "StorageError",
     "default_storage",
