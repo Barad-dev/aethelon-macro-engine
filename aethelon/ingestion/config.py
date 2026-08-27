@@ -85,7 +85,7 @@ DEFAULT_FRED_SERIES_PACING_S: float = 0.75
 DEFAULT_RSS_FEEDS: dict[str, str] = {
     # Major financial news
     "Yahoo Finance": "https://finance.yahoo.com/news/rssindex",
-    "Nasdaq Markets": "https://www.nasdaq.com/feed/rssoutbound?category=Markets",
+    # Nasdaq Markets dropped: host often hangs ~50s and stalled the sequential RSS pass.
     "MarketWatch": "https://feeds.marketwatch.com/marketwatch/topstories/",
     "MarketWatch Forex": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
     "CNBC Economy": (
@@ -151,18 +151,15 @@ DEFAULT_FRED_SERIES_META: dict[str, FredSeriesMeta] = {
     "DGS10": ("10-Yr Treasury Yield", "USD", "yield"),
     "DGS2": ("2-Yr Treasury Yield", "USD", "yield"),
     "DTWEXBGS": ("USD Broad Trade-Weighted Index", "USD", "dollar_index"),
-    "GOLDAMGBD228NLBM": ("Gold Fix AM Price", "XAU", "commodity"),
-    "EUROUSDM": ("EUR/USD Monthly", "EUR", "fx"),
-    "GBPUSDM": ("GBP/USD Monthly", "GBP", "fx"),
     "PCEPI": ("PCE Price Index", "USD", "inflation"),
-    "COREPCE": ("Core PCE Price Index", "USD", "inflation"),
+    "PCEPILFE": ("Core PCE Price Index", "USD", "inflation"),
     "T10YIE": ("10-Yr Breakeven Inflation Rate", "USD", "inflation"),
     "M2SL": ("M2 Money Supply", "USD", "monetary"),
     "WALCL": ("Fed Total Assets (Balance Sheet)", "USD", "monetary"),
     "VIXCLS": ("VIX Volatility Index", "USD", "volatility"),
     "DEXUSEU": ("USD/EUR Exchange Rate", "EUR", "fx"),
     "DEXUSUK": ("USD/GBP Exchange Rate", "GBP", "fx"),
-    "DEXUSCH": ("USD/CHF Exchange Rate", "CHF", "fx"),
+    "DEXSZUS": ("CHF/USD Exchange Rate", "CHF", "fx"),
     "DEXJPUS": ("JPY/USD Exchange Rate", "JPY", "fx"),
 }
 

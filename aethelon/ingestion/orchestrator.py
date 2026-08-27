@@ -52,6 +52,10 @@ log = get_logger(__name__)
 
 PathLike = Union[str, Path]
 
+# Per-feed cap so one hung RSS host cannot consume the whole sequential pass.
+# Healthy feeds usually return in 1–3s; on timeout the next feed still runs.
+_RSS_FEED_TIMEOUT_S = 8.0
+
 # Sentinel: distinguish "caller omitted" from "caller passed empty / False".
 _UNSET: Any = object()
 
@@ -283,18 +287,36 @@ class IngestionOrchestrator:
         *,
         fail_soft: bool,
     ) -> list[NormalizedItem]:
-        """Fetch each configured RSS/Atom feed via ``RSSDriver``."""
+        """
+        Fetch each configured RSS/Atom feed via ``RSSDriver``.
+
+        Each feed is bounded by ``_RSS_FEED_TIMEOUT_S``. A timeout or
+        fetch error is logged; when ``fail_soft`` is True the remaining
+        feeds still run.
+        """
         driver = RSSDriver(self._http, self._watermarks)
         out: list[NormalizedItem] = []
         for name, url in feeds:
             try:
-                items = await driver.fetch(url, source_name=name)
+                items = await asyncio.wait_for(
+                    driver.fetch(url, source_name=name),
+                    timeout=_RSS_FEED_TIMEOUT_S,
+                )
                 out.extend(items)
                 log.debug(
                     "orchestrator RSS ok source=%s new=%s",
                     name,
                     len(items),
                 )
+            except TimeoutError:
+                log.error(
+                    "orchestrator RSS timeout source=%s url=%s timeout=%.0fs",
+                    name,
+                    url,
+                    _RSS_FEED_TIMEOUT_S,
+                )
+                if not fail_soft:
+                    raise
             except Exception as exc:
                 log.error(
                     "orchestrator RSS failed source=%s url=%s err=%s",

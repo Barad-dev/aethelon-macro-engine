@@ -143,6 +143,72 @@ def _print_section(title: str) -> None:
     print(bar)
 
 
+_INVALID_FRED_IDS: frozenset[str] = frozenset(
+    {"GOLDAMGBD228NLBM", "EUROUSDM", "GBPUSDM", "COREPCE", "DEXUSCH"}
+)
+
+
+def _assert_source_hygiene() -> None:
+    """Fail fast if known-bad FRED ids or the stalling Nasdaq feed return."""
+    leftover = _INVALID_FRED_IDS.intersection(DEFAULT_FRED_SERIES)
+    if leftover:
+        raise AssertionError(f"invalid FRED ids still in defaults: {sorted(leftover)}")
+    if "PCEPILFE" not in DEFAULT_FRED_SERIES:
+        raise AssertionError("PCEPILFE (Core PCE) missing from default FRED series")
+    if "DEXSZUS" not in DEFAULT_FRED_SERIES:
+        raise AssertionError("DEXSZUS (CHF/USD) missing from default FRED series")
+    if "Nasdaq Markets" in DEFAULT_RSS_FEEDS:
+        raise AssertionError("Nasdaq Markets must stay off the default RSS list")
+
+
+def _check_rss_timeout_isolation() -> None:
+    """Fail if one hung RSS fetch can block the rest of the sequential pass."""
+    from unittest.mock import patch
+
+    from aethelon.ingestion.orchestrator import IngestionOrchestrator
+
+    class _FakeHttp:
+        is_open = True
+
+    async def _fetch(
+        self: Any,
+        feed_url: str,
+        *,
+        source_name: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        if "slow" in feed_url:
+            await asyncio.sleep(30.0)
+            return []
+        return [{"kind": "rss", "title": "ok", "source": source_name or ""}]
+
+    async def _run() -> None:
+        with tempfile.TemporaryDirectory(prefix="aethelon-rss-to-") as td:
+            orch = IngestionOrchestrator(
+                http=_FakeHttp(),  # type: ignore[arg-type]
+                watermark_path=Path(td) / "wm.json",
+            )
+            with patch("aethelon.ingestion.orchestrator.RSSDriver.fetch", new=_fetch):
+                t0 = time.perf_counter()
+                items = await orch._run_rss(
+                    [
+                        ("Slow", "http://slow.example/rss"),
+                        ("Fast", "http://fast.example/rss"),
+                    ],
+                    fail_soft=True,
+                )
+                elapsed = time.perf_counter() - t0
+        if elapsed >= 15.0:
+            raise AssertionError(
+                f"slow RSS feed still blocked the pass ({elapsed:.1f}s)"
+            )
+        sources = {str(item.get("source") or "") for item in items}
+        if "Fast" not in sources:
+            raise AssertionError(f"fast feed did not run after slow timeout: {items!r}")
+
+    asyncio.run(_run())
+
+
 def _build_config(*, quick: bool) -> IngestionConfig:
     """
     Build the config used for this test run.
@@ -520,6 +586,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     samples = max(0, int(args.samples))
 
     _print_section("Aethelon B3.5 — Ingestion path test")
+    _assert_source_hygiene()
+    _check_rss_timeout_isolation()
+    print("  Hygiene     : FRED ids + Nasdaq list + RSS per-feed timeout OK")
     print(f"  Repo        : {_REPO_ROOT}")
     print(f"  Time (UTC)  : {_utc_now_iso()}")
     print(f"  Mode        : {'quick' if args.quick else 'full default config'}")
